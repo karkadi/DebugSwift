@@ -194,9 +194,10 @@ public final class CustomHTTPProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
         
         // Process for DebugSwift tracking
-        Task { @Sendable [weak self] in
-            guard let self = self else { return }
-            await self.processNetworkData()
+        // Snapshot all values before crossing actor boundary
+        let snapshot = NetworkDataSnapshot(self)
+        Task { @MainActor in
+            await CustomHTTPProtocol.processNetworkData(snapshot: snapshot)
         }
     }
     
@@ -205,9 +206,9 @@ public final class CustomHTTPProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocol(self, didFailWithError: error)
         
         // Process for DebugSwift tracking
-        Task { @Sendable [weak self] in
-            guard let self = self else { return }
-            await self.processNetworkData()
+        let snapshot = NetworkDataSnapshot(self)
+        Task { @MainActor in
+            await CustomHTTPProtocol.processNetworkData(snapshot: snapshot)
         }
     }
     
@@ -235,27 +236,41 @@ public final class CustomHTTPProtocol: URLProtocol, @unchecked Sendable {
 
     public override func stopLoading() {
         dataTask?.cancel()
-
-        if let task = dataTask {
-            task.cancel()
-            dataTask = nil
-        }
-        
         // Invalidate session to break retain cycle
+        dataTask = nil
         session?.invalidateAndCancel()
         session = nil
 
-        Task { @Sendable in
-            guard await NetworkHelper.shared.isNetworkEnable else {
-                return
-            }
-            
-            await processNetworkData()
+        let snapshot = NetworkDataSnapshot(self)
+        Task { @MainActor in
+            guard NetworkHelper.shared.isNetworkEnable else { return }
+            await CustomHTTPProtocol.processNetworkData(snapshot: snapshot)
         }
     }
     
+    private struct NetworkDataSnapshot: Sendable {
+        let request: URLRequest
+        let response: HTTPURLResponse?
+        let data: Data
+        let error: Error?
+        let startTime: Date
+
+        init(_ proto: CustomHTTPProtocol) {
+            self.request = proto.request
+            self.response = proto.response
+            self.data = proto.data
+            self.error = proto.error
+            self.startTime = proto.startTime
+        }
+    }
     @MainActor
-    private func processNetworkData() async {
+    private static func processNetworkData(snapshot: NetworkDataSnapshot) async {
+        let request = snapshot.request
+        let response = snapshot.response
+        let data = snapshot.data
+        let error = snapshot.error
+        let startTime = snapshot.startTime
+
         var model = HttpModel()
         model.url = request.url
         model.method = request.httpMethod
@@ -429,7 +444,7 @@ extension CustomHTTPProtocol: URLSessionDataDelegate {
         return true
     }
 
-    private func getCachePolicy(value: UInt?) -> String {
+    private static func getCachePolicy(value: UInt?) -> String {
         switch value {
         case 0:
             return "useProtocolCachePolicy"
